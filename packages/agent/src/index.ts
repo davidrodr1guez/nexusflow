@@ -9,6 +9,11 @@ import { AgentBrain } from './agent-brain.js';
 import { protocolRegistry } from './protocols/index.js';
 import { strategyRegistry } from './strategies/index.js';
 import { LiFiAdapter } from './protocols/lifi-adapter.js';
+import { YellowAdapter } from './protocols/yellow-adapter.js';
+import { ENSAdapter } from './protocols/ens-adapter.js';
+import { ArcAdapter } from './protocols/arc-adapter.js';
+import { YieldOptimizerStrategy } from './strategies/yield-optimizer.js';
+import { RebalancerStrategy } from './strategies/rebalancer.js';
 import { createLogger } from './utils/logger.js';
 
 const logger = createLogger('main');
@@ -18,12 +23,13 @@ async function main(): Promise<void> {
 
   // Register protocol adapters
   protocolRegistry.register(new LiFiAdapter());
-  // TODO: protocolRegistry.register(new YellowAdapter());
-  // TODO: protocolRegistry.register(new ArcAdapter());
+  protocolRegistry.register(new YellowAdapter());
+  protocolRegistry.register(new ENSAdapter());
+  protocolRegistry.register(new ArcAdapter());
 
   // Register strategies
-  // TODO: strategyRegistry.register(new YieldOptimizerStrategy());
-  // TODO: strategyRegistry.register(new RebalancerStrategy());
+  strategyRegistry.register(new YieldOptimizerStrategy());
+  strategyRegistry.register(new RebalancerStrategy());
 
   // Create and start agent
   const agent = new AgentBrain({

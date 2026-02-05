@@ -76,15 +76,18 @@ export class LiFiAdapter implements ISwapAdapter, IBridgeAdapter {
       throw new Error(`LI.FI quote failed: ${error}`);
     }
 
-    const data = await response.json();
+    const data = (await response.json()) as Record<string, Record<string, unknown>>;
+    const estimate = data['estimate'] as Record<string, unknown> | undefined;
+    const gasCosts = (estimate?.['gasCosts'] as Array<Record<string, unknown>> | undefined) ?? [];
+    const toolDetails = data['toolDetails'] as Record<string, unknown> | undefined;
 
     return {
       fromToken: params.fromToken,
       toToken: params.toToken,
-      fromAmount: BigInt(data.estimate?.fromAmount ?? params.amount),
-      toAmount: BigInt(data.estimate?.toAmount ?? '0'),
-      estimatedGas: BigInt(data.estimate?.gasCosts?.[0]?.amount ?? '0'),
-      route: data.toolDetails?.name ?? 'LI.FI Best Route',
+      fromAmount: BigInt((estimate?.['fromAmount'] as string) ?? params.amount.toString()),
+      toAmount: BigInt((estimate?.['toAmount'] as string) ?? '0'),
+      estimatedGas: BigInt((gasCosts[0]?.['amount'] as string) ?? '0'),
+      route: (toolDetails?.['name'] as string) ?? 'LI.FI Best Route',
       provider: 'lifi',
       expiresAt: new Date(Date.now() + 60_000), // 1 minute
     };
@@ -130,16 +133,19 @@ export class LiFiAdapter implements ISwapAdapter, IBridgeAdapter {
       throw new Error(`LI.FI bridge quote failed: ${response.statusText}`);
     }
 
-    const data = await response.json();
+    const data = (await response.json()) as Record<string, Record<string, unknown>>;
+    const estimate = data['estimate'] as Record<string, unknown> | undefined;
+    const feeCosts = (estimate?.['feeCosts'] as Array<Record<string, unknown>> | undefined) ?? [];
+    const toolDetails = data['toolDetails'] as Record<string, unknown> | undefined;
 
     return {
       fromChain: params.fromChain,
       toChain: params.toChain,
       fromAmount: params.amount,
-      toAmount: BigInt(data.estimate?.toAmount ?? '0'),
-      estimatedTime: data.estimate?.executionDuration ?? 300,
-      bridgeName: data.toolDetails?.name ?? 'LI.FI Bridge',
-      fees: BigInt(data.estimate?.feeCosts?.[0]?.amount ?? '0'),
+      toAmount: BigInt((estimate?.['toAmount'] as string) ?? '0'),
+      estimatedTime: (estimate?.['executionDuration'] as number) ?? 300,
+      bridgeName: (toolDetails?.['name'] as string) ?? 'LI.FI Bridge',
+      fees: BigInt((feeCosts[0]?.['amount'] as string) ?? '0'),
     };
   }
 

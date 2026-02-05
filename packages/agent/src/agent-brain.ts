@@ -177,7 +177,7 @@ export class AgentBrain {
       return 0;
     });
 
-    const best = candidates[0];
+    const best = candidates[0]!;
     this.addLog('decide', `Selected action: ${best.description} (est. profit: ${best.estimatedProfit})`);
     return best;
   }

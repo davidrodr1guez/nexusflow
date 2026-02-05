@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity ^0.8.26;
 
 import {BaseHook} from "v4-periphery/src/utils/BaseHook.sol";
 import {Hooks} from "v4-core/src/libraries/Hooks.sol";
@@ -8,6 +8,7 @@ import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
 import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/src/types/BeforeSwapDelta.sol";
+import {SwapParams} from "v4-core/src/types/PoolOperation.sol";
 
 /**
  * @title NexusHook
@@ -46,11 +47,7 @@ contract NexusHook is BaseHook {
     // ============================================================
 
     event SwapExecuted(
-        PoolId indexed poolId,
-        address indexed sender,
-        bool zeroForOne,
-        int256 amountSpecified,
-        uint256 timestamp
+        PoolId indexed poolId, address indexed sender, bool zeroForOne, int256 amountSpecified, uint256 timestamp
     );
 
     event PrivacyModeToggled(PoolId indexed poolId, bool enabled);
@@ -78,13 +75,13 @@ contract NexusHook is BaseHook {
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
         return Hooks.Permissions({
             beforeInitialize: false,
-            afterInitialize: true, // Set default pool config
+            afterInitialize: true,
             beforeAddLiquidity: false,
             afterAddLiquidity: false,
             beforeRemoveLiquidity: false,
             afterRemoveLiquidity: false,
-            beforeSwap: true,       // Privacy: validate swap size + preferences
-            afterSwap: true,        // Analytics: log trade data for agent
+            beforeSwap: true,
+            afterSwap: true,
             beforeDonate: false,
             afterDonate: false,
             beforeSwapReturnDelta: false,
@@ -95,40 +92,34 @@ contract NexusHook is BaseHook {
     }
 
     // ============================================================
-    // Hook Callbacks
+    // Hook Callbacks (override internal _xxx methods)
     // ============================================================
 
     /// @notice Set default config when pool is initialized
-    function afterInitialize(
-        address,
-        PoolKey calldata key,
-        uint160,
-        int24
-    ) external override returns (bytes4) {
+    function _afterInitialize(address, PoolKey calldata key, uint160, int24)
+        internal
+        override
+        returns (bytes4)
+    {
         PoolId poolId = key.toId();
-        maxSwapSize[poolId] = type(uint256).max; // No limit by default
+        maxSwapSize[poolId] = type(uint256).max;
         return BaseHook.afterInitialize.selector;
     }
 
     /**
      * @notice Privacy-preserving swap validation
-     * @dev When privacy mode is enabled:
-     *   - Enforces maximum swap size to prevent information-leaking large trades
-     *   - Agent preferences (from ENS text records) control swap behavior
+     * @dev When privacy mode is enabled, enforces maximum swap size
      */
-    function beforeSwap(
-        address,
-        PoolKey calldata key,
-        IPoolManager.SwapParams calldata params,
-        bytes calldata
-    ) external override returns (bytes4, BeforeSwapDelta, uint24) {
+    function _beforeSwap(address, PoolKey calldata key, SwapParams calldata params, bytes calldata)
+        internal
+        override
+        returns (bytes4, BeforeSwapDelta, uint24)
+    {
         PoolId poolId = key.toId();
 
-        // Privacy check: enforce max swap size
         if (privacyModeEnabled[poolId]) {
-            uint256 swapSize = params.amountSpecified > 0
-                ? uint256(params.amountSpecified)
-                : uint256(-params.amountSpecified);
+            uint256 swapSize =
+                params.amountSpecified > 0 ? uint256(params.amountSpecified) : uint256(-params.amountSpecified);
 
             uint256 maxSize = maxSwapSize[poolId];
             if (swapSize > maxSize) {
@@ -143,20 +134,18 @@ contract NexusHook is BaseHook {
      * @notice Post-swap analytics for the agent brain
      * @dev Logs trade data that the off-chain agent uses for strategy optimization
      */
-    function afterSwap(
+    function _afterSwap(
         address sender,
         PoolKey calldata key,
-        IPoolManager.SwapParams calldata params,
+        SwapParams calldata params,
         BalanceDelta,
         bytes calldata
-    ) external override returns (bytes4, int128) {
+    ) internal override returns (bytes4, int128) {
         PoolId poolId = key.toId();
 
-        // Update analytics
         swapCount[poolId]++;
-        uint256 volume = params.amountSpecified > 0
-            ? uint256(params.amountSpecified)
-            : uint256(-params.amountSpecified);
+        uint256 volume =
+            params.amountSpecified > 0 ? uint256(params.amountSpecified) : uint256(-params.amountSpecified);
         cumulativeVolume[poolId] += volume;
 
         emit SwapExecuted(poolId, sender, params.zeroForOne, params.amountSpecified, block.timestamp);

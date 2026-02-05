@@ -3,7 +3,7 @@
  * All protocol integrations are registered here and accessed through this module.
  */
 
-import type { IProtocolAdapter } from './types.js';
+import type { IProtocolAdapter } from '../types.js';
 import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger('protocols');
@@ -71,7 +71,8 @@ class ProtocolRegistry {
         await adapter.shutdown();
         logger.info(`${name} shut down`);
       } catch (err) {
-        logger.error(`Failed to shut down ${name}:`, err);
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`Failed to shut down ${name}: ${msg}`);
       }
     }
   }
