@@ -1,0 +1,45 @@
+{
+  "name": "nexusflow",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI-Powered Cross-Chain DeFi Agent with ENS Identity — HackMoney 2026",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "dev": "npm run dev --workspace=packages/frontend",
+    "dev:agent": "npm run dev --workspace=packages/agent",
+    "format": "prettier --write '**/*.{ts,tsx,json,md}'",
+    "format:check": "prettier --check '**/*.{ts,tsx,json,md}'",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "clean": "rm -rf node_modules packages/*/node_modules packages/*/dist"
+  },
+  "devDependencies": {
+    "prettier": "^3.4.0",
+    "typescript": "^5.7.0",
+    "eslint": "^9.18.0",
+    "@typescript-eslint/eslint-plugin": "^8.20.0",
+    "@typescript-eslint/parser": "^8.20.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "defi",
+    "ai-agent",
+    "cross-chain",
+    "uniswap-v4",
+    "ens",
+    "lifi",
+    "yellow-network",
+    "arc",
+    "usdc",
+    "ethglobal",
+    "hackmoney"
+  ],
+  "license": "MIT"
+}

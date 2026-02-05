@@ -1,0 +1,67 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Grep",
+      "Glob",
+      "Bash(npm run *)",
+      "Bash(npx *)",
+      "Bash(forge *)",
+      "Bash(git *)",
+      "Bash(cat *)",
+      "Bash(ls *)",
+      "Bash(mkdir *)",
+      "Bash(cp *)",
+      "Bash(mv *)",
+      "Bash(echo *)",
+      "Bash(cd *)",
+      "Bash(node *)",
+      "Bash(npx vitest *)",
+      "Bash(npx prettier *)",
+      "Bash(npx eslint *)"
+    ],
+    "deny": [
+      "Bash(rm -rf /)",
+      "Bash(sudo *)",
+      "Bash(*PRIVATE_KEY*)",
+      "Bash(*secret*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"$(git branch --show-current)\" != \"main\" ] || { echo '{\"block\": true, \"message\": \"Cannot edit on main branch. Create a feature branch first: git checkout -b feat/your-feature\"}' >&2; exit 2; }",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "FILE=\"$TOOL_INPUT_path\"; if echo \"$FILE\" | grep -qE '\\.(ts|tsx)$'; then npx prettier --write \"$FILE\" 2>/dev/null; fi",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '\\n✅ Remember: Run npm run test before committing.'",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
