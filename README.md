@@ -145,10 +145,16 @@ nexusflow/
 
 > [📹 Watch the 3-minute demo →](TODO_ADD_LINK)
 
+## 🔗 Deployed Contracts
+
+| Contract | Network | Address |
+|----------|---------|---------|
+| **NexusHook** | Sepolia | [`0xA23275CC359aF643f81Ed6d557C1d479f6Dc90c0`](https://sepolia.etherscan.io/address/0xA23275CC359aF643f81Ed6d557C1d479f6Dc90c0) |
+| **Agent Wallet** | Sepolia | [`0xDBe5C802df8656995646AD55d2306aB05b7fc2d4`](https://sepolia.etherscan.io/address/0xDBe5C802df8656995646AD55d2306aB05b7fc2d4) |
+
 ## 👥 Team
 
-- **[Your Name]** — Full-stack + Smart Contracts
-- **[Teammate]** — Agent Logic + Protocol Integrations
+- **David Rodriguez** — Vibecoder + Vision
 
 ## 📄 License
 

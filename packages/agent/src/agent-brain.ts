@@ -1,17 +1,10 @@
 /**
  * AgentBrain — The core orchestrator of NexusFlow.
  *
- * Implements the Monitor → Decide → Execute loop:
- * 1. Monitor: Scan cross-chain state, prices, yield opportunities
+ * Implements the Monitor -> Decide -> Execute loop:
+ * 1. Monitor: Scan real Sepolia balances and cross-chain state
  * 2. Decide: Evaluate strategies against current state
  * 3. Execute: Perform the highest-value action via protocol adapters
- *
- * Integrations used:
- * - LI.FI: Cross-chain routing
- * - Uniswap v4: AMM pools + hooks
- * - Yellow SDK: Off-chain instant payments
- * - Arc/Circle: USDC cross-chain settlement
- * - ENS: Agent identity + preference storage
  */
 
 import type {
@@ -24,6 +17,8 @@ import type {
 } from './types.js';
 import { protocolRegistry } from './protocols/index.js';
 import { strategyRegistry } from './strategies/index.js';
+import { getAgentBalances, balanceToChainBalance } from './blockchain/balances.js';
+import { addTransaction } from './server.js';
 import { createLogger } from './utils/logger.js';
 
 const logger = createLogger('agent-brain');
@@ -32,13 +27,13 @@ export interface AgentBrainConfig {
   ensName: string;
   owner: `0x${string}`;
   preferences: AgentPreferences;
-  tickIntervalMs: number; // How often the agent loop runs
+  tickIntervalMs: number;
 }
 
 const DEFAULT_PREFERENCES: AgentPreferences = {
-  maxSlippageBps: 50, // 0.5%
+  maxSlippageBps: 50,
   riskLevel: 'medium',
-  preferredChains: [1, 42161, 10, 8453] as ChainId[],
+  preferredChains: [1, 42161, 10, 8453, 11155111] as ChainId[],
   maxGasPerTx: 500000n,
   rebalanceThresholdPct: 5,
 };
@@ -49,13 +44,14 @@ export class AgentBrain {
   private running = false;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
   private logs: AgentLog[] = [];
+  private tickCount = 0;
 
   constructor(config: Partial<AgentBrainConfig> & { ensName: string; owner: `0x${string}` }) {
     this.config = {
       ensName: config.ensName,
       owner: config.owner,
       preferences: config.preferences ?? DEFAULT_PREFERENCES,
-      tickIntervalMs: config.tickIntervalMs ?? 30_000, // 30 seconds
+      tickIntervalMs: config.tickIntervalMs ?? 30_000,
     };
 
     this.state = {
@@ -108,14 +104,15 @@ export class AgentBrain {
   }
 
   // ============================================================
-  // Monitor → Decide → Execute Loop
+  // Monitor -> Decide -> Execute Loop
   // ============================================================
 
   private async tick(): Promise<void> {
     if (!this.running) return;
+    this.tickCount++;
 
     try {
-      // 1. MONITOR — Update state
+      // 1. MONITOR — Update state with real data
       await this.monitor();
 
       // 2. DECIDE — Evaluate strategies
@@ -124,6 +121,8 @@ export class AgentBrain {
       // 3. EXECUTE — If there's a worthwhile action
       if (action) {
         await this.execute(action);
+      } else {
+        this.addLog('monitor', `Tick #${this.tickCount} complete. No action needed. Next scan in ${this.config.tickIntervalMs / 1000}s.`);
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown error in agent tick';
@@ -133,12 +132,30 @@ export class AgentBrain {
   }
 
   private async monitor(): Promise<void> {
-    this.addLog('monitor', 'Scanning cross-chain state across all connected chains...');
+    this.addLog('monitor', `Tick #${this.tickCount}: Scanning Sepolia chain state...`);
 
-    // TODO: Fetch real balances from each chain via viem
-    // TODO: Fetch ENS text records for preferences
-    // TODO: Update yield rates from protocols
+    try {
+      // Fetch real balances from Sepolia
+      const balances = await getAgentBalances();
+      const chainBalance = balanceToChainBalance(balances);
 
+      this.state.chainBalances = [chainBalance];
+      this.state.totalPortfolioUsd = chainBalance.totalUsdValue;
+
+      this.addLog('monitor', `Agent balance: ${balances.ethFormatted.slice(0, 8)} ETH (~$${balances.ethUsdEstimate.toFixed(2)})`, 'Sepolia');
+
+      if (balances.tokens.length > 0) {
+        for (const token of balances.tokens) {
+          this.addLog('monitor', `  ${token.symbol}: ${token.formatted.slice(0, 10)}`, 'Sepolia');
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to read balances';
+      this.addLog('error', `Balance read failed: ${msg}`);
+    }
+
+    // Update active strategies list
+    this.state.activeStrategies = strategyRegistry.getActive().map((s) => s.id);
     this.state.lastUpdated = new Date();
   }
 
@@ -148,9 +165,8 @@ export class AgentBrain {
       return null;
     }
 
-    this.addLog('monitor', `Evaluating ${activeStrategies.length} active strategies...`);
+    this.addLog('decide', `Evaluating ${activeStrategies.length} active strategies...`);
 
-    // Evaluate all strategies and pick the best action
     const candidates: StrategyAction[] = [];
 
     for (const strategy of activeStrategies) {
@@ -167,6 +183,7 @@ export class AgentBrain {
     }
 
     if (candidates.length === 0) {
+      this.addLog('decide', 'No profitable actions found above gas threshold. Holding positions.');
       return null;
     }
 
@@ -189,9 +206,21 @@ export class AgentBrain {
     const result = await strategy.execute(action);
 
     if (result.success) {
-      this.addLog('execute', `✅ Success: ${action.description}`, result.chainId.toString(), result.txHash);
+      this.addLog('execute', `Success: ${action.description}`, result.chainId.toString(), result.txHash);
+
+      // Record transaction
+      if (result.txHash) {
+        addTransaction({
+          txHash: result.txHash,
+          type: action.type === 'bridge' ? 'bridge' : 'swap',
+          description: action.description,
+          chainId: result.chainId,
+          timestamp: new Date().toISOString(),
+          status: 'confirmed',
+        });
+      }
     } else {
-      this.addLog('error', `❌ Failed: ${action.description} — ${result.error}`);
+      this.addLog('error', `Failed: ${action.description} — ${result.error}`);
     }
 
     return result;
@@ -209,9 +238,9 @@ export class AgentBrain {
       chain,
       txHash,
     };
-    this.logs.unshift(log); // Most recent first
+    this.logs.unshift(log);
     if (this.logs.length > 1000) {
-      this.logs = this.logs.slice(0, 500); // Trim to prevent memory issues
+      this.logs = this.logs.slice(0, 500);
     }
   }
 
@@ -233,5 +262,9 @@ export class AgentBrain {
 
   getProtocolHealth(): Promise<Record<string, boolean>> {
     return protocolRegistry.healthCheckAll();
+  }
+
+  getTickCount(): number {
+    return this.tickCount;
   }
 }

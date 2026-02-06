@@ -1,42 +1,9 @@
 import { useState, useEffect } from 'react';
-import { Search } from 'lucide-react';
+import { Search, ExternalLink, Radio } from 'lucide-react';
+import { useAgentStore } from '../stores/agent-store';
+import { ETHERSCAN_SEPOLIA } from '../lib/constants';
 
 type LogLevel = 'monitor' | 'decide' | 'execute' | 'error';
-
-interface LogEntry {
-  id: number;
-  timestamp: string;
-  level: LogLevel;
-  message: string;
-  chain?: string;
-  txHash?: string;
-}
-
-// Mock log feed simulating a full agent cycle
-const MOCK_LOGS: Omit<LogEntry, 'id' | 'timestamp'>[] = [
-  { level: 'monitor', message: 'Scanning cross-chain state across ETH, ARB, OP, BASE...' },
-  { level: 'monitor', message: 'ETH balance: 2.45 ETH ($4,200) | ARB: 1,800 USDC | OP: 950 USDC', chain: 'multi' },
-  { level: 'monitor', message: 'Yield opportunity detected: Arbitrum USDC/ETH pool APY 14.2%', chain: 'Arbitrum' },
-  { level: 'monitor', message: 'Reading ENS preferences for nexusflow.eth — risk: medium, slippage: 0.5%', chain: 'Ethereum' },
-  { level: 'decide', message: 'Evaluating 3 active strategies against current market state...' },
-  { level: 'decide', message: 'YieldOptimizer suggests: Bridge 500 USDC from Base to Arbitrum (est. profit: $12.40)', chain: 'Arbitrum' },
-  { level: 'decide', message: 'Rebalancer suggests: Rebalance portfolio (5.2% deviation detected)', chain: 'multi' },
-  { level: 'decide', message: 'Selected: YieldOptimizer — Bridge + Deposit to ARB USDC/ETH pool' },
-  { level: 'execute', message: 'Requesting LI.FI bridge quote: Base → Arbitrum, 500 USDC', chain: 'Base' },
-  { level: 'execute', message: 'LI.FI quote received: 499.75 USDC via Stargate, est. 2min', chain: 'Base' },
-  { level: 'execute', message: 'Initiating Yellow SDK state channel for instant settlement', chain: 'Arbitrum' },
-  { level: 'execute', message: 'Bridge tx submitted', chain: 'Base', txHash: '0x1a2b3c...4d5e6f' },
-  { level: 'monitor', message: 'Bridge in transit — monitoring status via LI.FI...', chain: 'multi' },
-  { level: 'execute', message: 'Bridge completed! 499.75 USDC arrived on Arbitrum', chain: 'Arbitrum' },
-  { level: 'execute', message: 'Depositing 499.75 USDC into Uniswap v4 USDC/ETH pool via NexusHook', chain: 'Arbitrum', txHash: '0x7f8e9d...0a1b2c' },
-  { level: 'execute', message: 'LP position created. Privacy mode enabled on NexusHook.', chain: 'Arbitrum' },
-  { level: 'monitor', message: 'USDC settlement recorded via Arc/Circle — cross-chain balance updated', chain: 'multi' },
-  { level: 'monitor', message: 'Cycle complete. Portfolio: $12,847 (+$12.40). Next scan in 30s.' },
-  { level: 'error', message: 'Rate limit warning: LI.FI API approaching 80% quota' },
-  { level: 'monitor', message: 'Scanning cross-chain state across ETH, ARB, OP, BASE...' },
-  { level: 'decide', message: 'No profitable actions found above gas threshold. Holding positions.' },
-  { level: 'monitor', message: 'Idle cycle complete. Next scan in 30s.' },
-];
 
 const LEVEL_STYLES: Record<LogLevel, { color: string; bg: string; label: string }> = {
   monitor: { color: 'text-nexus-blue', bg: 'bg-nexus-blue/10', label: 'MONITOR' },
@@ -45,42 +12,23 @@ const LEVEL_STYLES: Record<LogLevel, { color: string; bg: string; label: string 
   error: { color: 'text-nexus-error', bg: 'bg-nexus-error/10', label: 'ERROR' },
 };
 
-function formatTime(idx: number): string {
-  const base = new Date();
-  base.setSeconds(base.getSeconds() - (MOCK_LOGS.length - idx) * 3);
-  return base.toISOString().slice(11, 23);
+function formatTimestamp(ts: string): string {
+  try {
+    return new Date(ts).toISOString().slice(11, 23);
+  } catch {
+    return ts;
+  }
 }
 
 export function Logs() {
-  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const { logs, connected, startPolling, stopPolling } = useAgentStore();
   const [filter, setFilter] = useState<LogLevel | 'all'>('all');
   const [search, setSearch] = useState('');
 
-  // Animate logs appearing one by one
   useEffect(() => {
-    const entries = MOCK_LOGS.map((log, i) => ({
-      ...log,
-      id: i,
-      timestamp: formatTime(i),
-    }));
-
-    let idx = 0;
-    setLogs([]);
-
-    const interval = setInterval(() => {
-      if (idx < entries.length) {
-        const entry = entries[idx];
-        if (entry) {
-          setLogs((prev) => [entry, ...prev]);
-        }
-        idx++;
-      } else {
-        clearInterval(interval);
-      }
-    }, 300);
-
-    return () => clearInterval(interval);
-  }, []);
+    startPolling(3000);
+    return () => stopPolling();
+  }, [startPolling, stopPolling]);
 
   const filtered = logs.filter((log) => {
     if (filter !== 'all' && log.level !== filter) return false;
@@ -90,6 +38,19 @@ export function Logs() {
 
   return (
     <div className="space-y-4">
+      {/* Live indicator */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Radio size={14} className={connected ? 'text-nexus-accent animate-pulse' : 'text-nexus-error'} />
+          <span className="text-xs font-mono text-nexus-muted">
+            {connected ? 'Live feed from agent' : 'Agent disconnected — start with: npm run dev:agent'}
+          </span>
+        </div>
+        <span className="text-xs font-mono text-nexus-muted">
+          {logs.length} entries
+        </span>
+      </div>
+
       {/* Controls */}
       <div className="flex items-center gap-3">
         <div className="relative flex-1 max-w-sm">
@@ -122,15 +83,15 @@ export function Logs() {
       {/* Log Feed */}
       <div className="bg-nexus-surface border border-nexus-border rounded-xl overflow-hidden">
         <div className="max-h-[600px] overflow-y-auto">
-          {filtered.map((log) => {
+          {filtered.map((log, i) => {
             const style = LEVEL_STYLES[log.level];
             return (
               <div
-                key={log.id}
-                className="flex items-start gap-3 px-4 py-2.5 border-b border-nexus-border/50 hover:bg-nexus-bg/50 animate-slide-up"
+                key={`${log.timestamp}-${i}`}
+                className="flex items-start gap-3 px-4 py-2.5 border-b border-nexus-border/50 hover:bg-nexus-bg/50"
               >
                 <span className="text-[10px] font-mono text-nexus-muted whitespace-nowrap mt-0.5">
-                  {log.timestamp}
+                  {formatTimestamp(log.timestamp)}
                 </span>
                 <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded ${style.bg} ${style.color} whitespace-nowrap mt-0.5`}>
                   {style.label}
@@ -144,9 +105,14 @@ export function Logs() {
                       </span>
                     )}
                     {log.txHash && (
-                      <span className="text-[9px] font-mono text-nexus-accent/70 cursor-pointer hover:text-nexus-accent">
-                        tx:{log.txHash}
-                      </span>
+                      <a
+                        href={`${ETHERSCAN_SEPOLIA}/tx/${log.txHash}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-[9px] font-mono text-nexus-accent/70 hover:text-nexus-accent flex items-center gap-0.5"
+                      >
+                        tx:{log.txHash.slice(0, 10)}... <ExternalLink size={8} />
+                      </a>
                     )}
                   </div>
                 </div>
@@ -155,7 +121,7 @@ export function Logs() {
           })}
           {filtered.length === 0 && (
             <div className="px-4 py-8 text-center text-xs text-nexus-muted font-mono">
-              No logs matching filter
+              {connected ? 'No logs matching filter' : 'Waiting for agent connection...'}
             </div>
           )}
         </div>

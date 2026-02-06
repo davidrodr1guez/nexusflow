@@ -99,7 +99,19 @@ describe('LiFiAdapter', () => {
     await expect(adapter.getQuote(params)).rejects.toThrow('LI.FI quote failed');
   });
 
-  it('should execute a swap and return success', async () => {
+  it('should execute a swap by fetching transactionRequest from LI.FI', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        transactionRequest: {
+          to: '0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE',
+          data: '0xabcdef',
+          value: '0',
+          gasLimit: '250000',
+        },
+      }),
+    });
+
     const quote = {
       fromToken: MOCK_ETH,
       toToken: MOCK_USDC,
@@ -113,8 +125,30 @@ describe('LiFiAdapter', () => {
 
     const result = await adapter.executeSwap(quote);
     expect(result.success).toBe(true);
-    expect(result.txHash).toBeDefined();
     expect(result.chainId).toBe(1);
+    expect(result.gasUsed).toBe(250000n);
+  });
+
+  it('should return error when LI.FI returns no transactionRequest', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({}),
+    });
+
+    const quote = {
+      fromToken: MOCK_ETH,
+      toToken: MOCK_USDC,
+      fromAmount: 1000000000000000000n,
+      toAmount: 2500000000n,
+      estimatedGas: 50000n,
+      route: 'Uniswap V3',
+      provider: 'lifi',
+      expiresAt: new Date(),
+    };
+
+    const result = await adapter.executeSwap(quote);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('transactionRequest');
   });
 
   it('should get a bridge quote', async () => {
@@ -144,9 +178,19 @@ describe('LiFiAdapter', () => {
     expect(quote.fees).toBe(500000n);
   });
 
-  it('should return completed bridge status', async () => {
+  it('should return completed bridge status when API says DONE', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: 'DONE' }),
+    });
     const status = await adapter.getBridgeStatus('0x123');
     expect(status).toBe('completed');
+  });
+
+  it('should return pending bridge status when API is unreachable', async () => {
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error('Network error'));
+    const status = await adapter.getBridgeStatus('0x123');
+    expect(status).toBe('pending');
   });
 
   it('should shut down cleanly', async () => {

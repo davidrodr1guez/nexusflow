@@ -13,17 +13,18 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@lifi/sdk": "^3.5.0",
     "@ensdomains/ensjs": "^4.0.0",
-    "viem": "^2.22.0",
-    "zod": "^3.24.0",
+    "@erc7824/nitrolite": "^0.5.3",
+    "@lifi/sdk": "^3.5.0",
+    "dotenv": "^16.4.0",
     "pino": "^9.6.0",
-    "dotenv": "^16.4.0"
+    "viem": "^2.22.0",
+    "zod": "^3.24.0"
   },
   "devDependencies": {
-    "typescript": "^5.7.0",
+    "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
-    "vitest": "^2.1.0",
-    "@types/node": "^22.0.0"
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
   }
 }

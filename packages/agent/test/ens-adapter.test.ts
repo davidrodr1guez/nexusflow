@@ -1,16 +1,52 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+// Mock viem to control the public client
+const mockGetBlockNumber = vi.fn().mockResolvedValue(12345n);
+const mockGetEnsAddress = vi.fn();
+const mockGetEnsText = vi.fn();
+
+vi.mock('viem', async () => {
+  const actual = await vi.importActual('viem');
+  return {
+    ...(actual as object),
+    createPublicClient: vi.fn(() => ({
+      getBlockNumber: mockGetBlockNumber,
+      getEnsAddress: mockGetEnsAddress,
+      getEnsText: mockGetEnsText,
+    })),
+  };
+});
+
+vi.mock('viem/ens', () => ({
+  normalize: vi.fn((name: string) => name),
+}));
+
 import { ENSAdapter } from '../src/protocols/ens-adapter.js';
 
 describe('ENSAdapter', () => {
   let adapter: ENSAdapter;
-  const originalFetch = globalThis.fetch;
 
   beforeEach(() => {
     adapter = new ENSAdapter('https://mock-rpc.test');
+    vi.clearAllMocks();
+
+    // Default mock implementations for text records
+    mockGetEnsText.mockImplementation(async ({ key }: { name: string; key: string }) => {
+      const records: Record<string, string> = {
+        'nexusflow:swap-pref': 'uniswap',
+        'nexusflow:risk': 'medium',
+        'nexusflow:chains': '1,42161,10,8453',
+      };
+      return records[key] ?? null;
+    });
+
+    mockGetEnsAddress.mockImplementation(async ({ name }: { name: string }) => {
+      if (name === 'vitalik.eth') return '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045';
+      return null;
+    });
   });
 
   afterEach(() => {
-    globalThis.fetch = originalFetch;
     vi.restoreAllMocks();
   });
 
@@ -23,17 +59,21 @@ describe('ENSAdapter', () => {
     await expect(adapter.initialize()).resolves.toBeUndefined();
   });
 
-  it('should return default swap-pref text record', async () => {
+  it('should read swap-pref text record from chain via viem', async () => {
     const value = await adapter.getTextRecord('nexusflow.eth', 'nexusflow:swap-pref');
     expect(value).toBe('uniswap');
+    expect(mockGetEnsText).toHaveBeenCalledWith({
+      name: 'nexusflow.eth',
+      key: 'nexusflow:swap-pref',
+    });
   });
 
-  it('should return default risk text record', async () => {
+  it('should read risk text record from chain via viem', async () => {
     const value = await adapter.getTextRecord('nexusflow.eth', 'nexusflow:risk');
     expect(value).toBe('medium');
   });
 
-  it('should return default chains text record', async () => {
+  it('should read chains text record from chain via viem', async () => {
     const value = await adapter.getTextRecord('nexusflow.eth', 'nexusflow:chains');
     expect(value).toBe('1,42161,10,8453');
   });
@@ -43,7 +83,7 @@ describe('ENSAdapter', () => {
     expect(value).toBeNull();
   });
 
-  it('should parse agent preferences from text records', async () => {
+  it('should parse agent preferences from on-chain text records', async () => {
     const prefs = await adapter.getAgentPreferences('nexusflow.eth');
     expect(prefs.riskLevel).toBe('medium');
     expect(prefs.preferredChains).toEqual([1, 42161, 10, 8453]);
@@ -52,9 +92,8 @@ describe('ENSAdapter', () => {
   it('should set a text record and cache it', async () => {
     const result = await adapter.setTextRecord('nexusflow.eth', 'nexusflow:risk', 'high');
     expect(result.success).toBe(true);
-    expect(result.txHash).toBeDefined();
 
-    // Should now read the new value from cache
+    // Should now read from cache (not call viem again)
     const value = await adapter.getTextRecord('nexusflow.eth', 'nexusflow:risk');
     expect(value).toBe('high');
   });
@@ -63,44 +102,43 @@ describe('ENSAdapter', () => {
     await adapter.getTextRecord('nexusflow.eth', 'nexusflow:risk');
     const value2 = await adapter.getTextRecord('nexusflow.eth', 'nexusflow:risk');
     expect(value2).toBe('medium');
+    // getEnsText should be called only once due to caching
+    expect(mockGetEnsText).toHaveBeenCalledTimes(1);
   });
 
   it('should clear cache on shutdown', async () => {
     await adapter.getTextRecord('nexusflow.eth', 'nexusflow:risk');
     await adapter.shutdown();
-    // After shutdown caches are cleared — but defaults still work
-    const value = await adapter.getTextRecord('nexusflow.eth', 'nexusflow:risk');
-    expect(value).toBe('medium');
+    // After shutdown, cache is cleared — next call will re-fetch
+    await adapter.getTextRecord('nexusflow.eth', 'nexusflow:risk');
+    expect(mockGetEnsText).toHaveBeenCalledTimes(2);
   });
 
   it('should handle healthCheck when RPC is down', async () => {
-    globalThis.fetch = vi.fn().mockRejectedValue(new Error('Connection refused'));
+    mockGetBlockNumber.mockRejectedValueOnce(new Error('Connection refused'));
     const result = await adapter.healthCheck();
     expect(result).toBe(false);
   });
 
   it('should handle healthCheck when RPC is up', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true });
     const result = await adapter.healthCheck();
     expect(result).toBe(true);
   });
 
-  it('should resolve ENS name (returns null without real RPC)', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ result: '0x' }),
-    });
-    const address = await adapter.resolveName('nexusflow.eth');
+  it('should resolve ENS name via viem getEnsAddress', async () => {
+    const address = await adapter.resolveName('vitalik.eth');
+    expect(address).toBe('0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045');
+    expect(mockGetEnsAddress).toHaveBeenCalledWith({ name: 'vitalik.eth' });
+  });
+
+  it('should return null for unregistered ENS name', async () => {
+    const address = await adapter.resolveName('nonexistent-name-xyz.eth');
     expect(address).toBeNull();
   });
 
-  it('should resolve ENS name when address is returned', async () => {
-    const mockAddress = '0000000000000000000000001234567890abcdef1234567890abcdef12345678';
-    globalThis.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ result: `0x${mockAddress}` }),
-    });
-    const address = await adapter.resolveName('vitalik.eth');
-    expect(address).toMatch(/^0x/);
+  it('should handle getTextRecord errors gracefully', async () => {
+    mockGetEnsText.mockRejectedValueOnce(new Error('RPC error'));
+    const value = await adapter.getTextRecord('nexusflow.eth', 'nexusflow:risk');
+    expect(value).toBeNull();
   });
 });

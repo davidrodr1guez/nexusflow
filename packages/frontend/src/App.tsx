@@ -1,20 +1,32 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 import { Overview } from './components/Overview';
 import { Strategies } from './components/Strategies';
 import { Logs } from './components/Logs';
+import { TransactionHistory } from './components/TransactionHistory';
+import { HookDemo } from './components/HookDemo';
 import { ENSIdentityBar } from './components/ENSIdentityBar';
+import { useAgentStore } from './stores/agent-store';
 
-type Tab = 'overview' | 'strategies' | 'logs';
+type Tab = 'overview' | 'strategies' | 'logs' | 'transactions' | 'hook';
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'overview', label: 'Overview' },
   { id: 'strategies', label: 'Strategies' },
-  { id: 'logs', label: 'Logs' },
+  { id: 'logs', label: 'Agent Logs' },
+  { id: 'transactions', label: 'Transactions' },
+  { id: 'hook', label: 'v4 Hook' },
 ];
 
 export function App() {
   const [activeTab, setActiveTab] = useState<Tab>('overview');
+  const { connected, health } = useAgentStore();
+
+  // Start polling on mount
+  useEffect(() => {
+    useAgentStore.getState().startPolling(5000);
+    return () => useAgentStore.getState().stopPolling();
+  }, []);
 
   return (
     <div className="min-h-screen flex flex-col bg-nexus-bg">
@@ -33,9 +45,19 @@ export function App() {
 
           <div className="flex items-center gap-4">
             {/* Agent Status Indicator */}
-            <div className="flex items-center gap-2 px-3 py-1.5 bg-nexus-surface rounded-lg border border-nexus-border">
-              <div className="w-2 h-2 rounded-full bg-nexus-accent animate-pulse-glow" />
-              <span className="text-xs font-mono text-nexus-accent">AGENT LIVE</span>
+            <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border ${
+              connected
+                ? 'bg-nexus-accent/10 border-nexus-accent/30'
+                : 'bg-nexus-error/10 border-nexus-error/30'
+            }`}>
+              <div className={`w-2 h-2 rounded-full ${
+                connected ? 'bg-nexus-accent animate-pulse-glow' : 'bg-nexus-error'
+              }`} />
+              <span className={`text-xs font-mono ${connected ? 'text-nexus-accent' : 'text-nexus-error'}`}>
+                {connected
+                  ? `AGENT ${health?.agent?.toUpperCase() ?? 'LIVE'}`
+                  : 'AGENT OFFLINE'}
+              </span>
             </div>
             <ConnectButton />
           </div>
@@ -70,6 +92,8 @@ export function App() {
           {activeTab === 'overview' && <Overview />}
           {activeTab === 'strategies' && <Strategies />}
           {activeTab === 'logs' && <Logs />}
+          {activeTab === 'transactions' && <TransactionHistory />}
+          {activeTab === 'hook' && <HookDemo />}
         </div>
       </main>
 

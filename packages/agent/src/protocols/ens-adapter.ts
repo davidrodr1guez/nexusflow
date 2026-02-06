@@ -2,6 +2,7 @@
  * ENS Protocol Adapter
  *
  * Provides ENS name resolution and text record management for the agent.
+ * Uses viem's built-in ENS actions to read on-chain data from mainnet.
  * The agent's identity and DeFi preferences are stored as ENS text records:
  *   - nexusflow:swap-pref — Preferred swap protocol
  *   - nexusflow:risk — Risk tolerance (low/medium/high)
@@ -12,6 +13,9 @@
 
 import type { IProtocolAdapter, ChainId, AgentPreferences } from '../types.js';
 import { createLogger } from '../utils/logger.js';
+import { createPublicClient, http } from 'viem';
+import { mainnet } from 'viem/chains';
+import { normalize } from 'viem/ens';
 
 const logger = createLogger('ens-adapter');
 
@@ -27,26 +31,31 @@ export class ENSAdapter implements IProtocolAdapter {
   readonly supportedChains: readonly ChainId[] = [1]; // ENS is on mainnet
 
   private rpcUrl: string;
+  private client: ReturnType<typeof createPublicClient>;
   private resolverCache = new Map<string, `0x${string}`>();
   private textRecordCache = new Map<string, string>();
 
   constructor(rpcUrl?: string) {
     this.rpcUrl = rpcUrl ?? `https://eth-mainnet.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY ?? ''}`;
+    this.client = createPublicClient({
+      chain: mainnet,
+      transport: http(this.rpcUrl),
+    });
   }
 
   async initialize(): Promise<void> {
     logger.info('Initializing ENS adapter...');
+    const healthy = await this.healthCheck();
+    if (!healthy) {
+      logger.decide('ENS RPC unreachable — text record reads will fail');
+    }
     logger.execute('ENS adapter initialized', { chains: this.supportedChains });
   }
 
   async healthCheck(): Promise<boolean> {
     try {
-      const response = await fetch(this.rpcUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jsonrpc: '2.0', method: 'eth_blockNumber', params: [], id: 1 }),
-      });
-      return response.ok;
+      await this.client.getBlockNumber();
+      return true;
     } catch {
       return false;
     }
@@ -59,7 +68,7 @@ export class ENSAdapter implements IProtocolAdapter {
   }
 
   /**
-   * Resolve an ENS name to an Ethereum address.
+   * Resolve an ENS name to an Ethereum address using viem.
    */
   async resolveName(ensName: string): Promise<`0x${string}` | null> {
     logger.monitor('Resolving ENS name', { name: ensName });
@@ -68,41 +77,24 @@ export class ENSAdapter implements IProtocolAdapter {
     if (cached) return cached;
 
     try {
-      const response = await fetch(this.rpcUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          method: 'eth_call',
-          params: [
-            {
-              to: '0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63', // ENS Universal Resolver
-              data: this.encodeResolve(ensName),
-            },
-            'latest',
-          ],
-          id: 1,
-        }),
+      const address = await this.client.getEnsAddress({
+        name: normalize(ensName),
       });
 
-      if (!response.ok) return null;
-
-      const result = (await response.json()) as { result?: string };
-      if (result.result && result.result !== '0x') {
-        const address = `0x${result.result.slice(-40)}` as `0x${string}`;
+      if (address) {
         this.resolverCache.set(ensName, address);
-        return address;
       }
 
-      return null;
-    } catch {
-      logger.error(`Failed to resolve ENS name: ${ensName}`);
+      return address;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      logger.error(`Failed to resolve ENS name: ${ensName}`, { error: msg });
       return null;
     }
   }
 
   /**
-   * Get a text record from an ENS name.
+   * Get a text record from an ENS name by reading on-chain via viem.
    */
   async getTextRecord(ensName: string, key: string): Promise<string | null> {
     logger.monitor('Reading ENS text record', { name: ensName, key });
@@ -111,19 +103,22 @@ export class ENSAdapter implements IProtocolAdapter {
     const cached = this.textRecordCache.get(cacheKey);
     if (cached !== undefined) return cached;
 
-    // In production, this would use viem/ensjs to read text records
-    // For hackathon demo, we return simulated values for known keys
-    const defaultRecords: ENSTextRecords = {
-      'nexusflow:swap-pref': 'uniswap',
-      'nexusflow:risk': 'medium',
-      'nexusflow:chains': '1,42161,10,8453',
-    };
+    try {
+      const value = await this.client.getEnsText({
+        name: normalize(ensName),
+        key,
+      });
 
-    const value = defaultRecords[key] ?? null;
-    if (value !== null) {
-      this.textRecordCache.set(cacheKey, value);
+      if (value) {
+        this.textRecordCache.set(cacheKey, value);
+      }
+
+      return value;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      logger.error(`Failed to read ENS text record: ${ensName} / ${key}`, { error: msg });
+      return null;
     }
-    return value;
   }
 
   /**
@@ -175,20 +170,12 @@ export class ENSAdapter implements IProtocolAdapter {
   ): Promise<{ success: boolean; txHash?: string }> {
     logger.execute('Setting ENS text record', { name: ensName, key, value });
 
-    // Simulated for hackathon — in production, sign and submit via viem
+    // Writing ENS text records requires a wallet transaction to the resolver.
+    // For now, update the local cache and log the intent.
     const cacheKey = `${ensName}:${key}`;
     this.textRecordCache.set(cacheKey, value);
 
-    return {
-      success: true,
-      txHash: `0x${Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join('')}`,
-    };
-  }
-
-  private encodeResolve(_name: string): string {
-    // Simplified ABI encoding for the resolve function
-    // In production, use viem's encodeFunctionData
-    return '0x';
+    return { success: true };
   }
 
   clearCache(): void {
