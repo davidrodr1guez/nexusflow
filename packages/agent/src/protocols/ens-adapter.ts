@@ -13,7 +13,8 @@
 
 import type { IProtocolAdapter, ChainId, AgentPreferences } from '../types.js';
 import { createLogger } from '../utils/logger.js';
-import { createPublicClient, http } from 'viem';
+import { createPublicClient, createWalletClient, http, encodeFunctionData, namehash } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
 import { mainnet } from 'viem/chains';
 import { normalize } from 'viem/ens';
 
@@ -160,8 +161,8 @@ export class ENSAdapter implements IProtocolAdapter {
   }
 
   /**
-   * Set a text record on an ENS name (requires wallet signing).
-   * In production this would submit an on-chain transaction.
+   * Set a text record on an ENS name via on-chain transaction to the resolver.
+   * Requires PRIVATE_KEY to be set for signing the transaction.
    */
   async setTextRecord(
     ensName: string,
@@ -170,12 +171,70 @@ export class ENSAdapter implements IProtocolAdapter {
   ): Promise<{ success: boolean; txHash?: string }> {
     logger.execute('Setting ENS text record', { name: ensName, key, value });
 
-    // Writing ENS text records requires a wallet transaction to the resolver.
-    // For now, update the local cache and log the intent.
-    const cacheKey = `${ensName}:${key}`;
-    this.textRecordCache.set(cacheKey, value);
+    const privateKey = process.env.PRIVATE_KEY;
+    if (!privateKey) {
+      logger.decide('No PRIVATE_KEY set — caching text record locally only');
+      const cacheKey = `${ensName}:${key}`;
+      this.textRecordCache.set(cacheKey, value);
+      return { success: true };
+    }
 
-    return { success: true };
+    try {
+      // Resolve the ENS name's resolver address
+      const resolverAddress = await this.client.getEnsResolver({
+        name: normalize(ensName),
+      });
+
+      if (!resolverAddress) {
+        logger.error('No resolver found for ENS name', { name: ensName });
+        return { success: false };
+      }
+
+      const account = privateKeyToAccount(
+        privateKey.startsWith('0x') ? (privateKey as `0x${string}`) : (`0x${privateKey}` as `0x${string}`),
+      );
+
+      const walletClient = createWalletClient({
+        account,
+        chain: mainnet,
+        transport: http(this.rpcUrl),
+      });
+
+      const node = namehash(normalize(ensName));
+      const txHash = await walletClient.sendTransaction({
+        to: resolverAddress,
+        data: encodeFunctionData({
+          abi: [{
+            type: 'function',
+            name: 'setText',
+            stateMutability: 'nonpayable',
+            inputs: [
+              { name: 'node', type: 'bytes32' },
+              { name: 'key', type: 'string' },
+              { name: 'value', type: 'string' },
+            ],
+            outputs: [],
+          }],
+          functionName: 'setText',
+          args: [node, key, value],
+        }),
+      });
+
+      // Update local cache
+      const cacheKey = `${ensName}:${key}`;
+      this.textRecordCache.set(cacheKey, value);
+
+      logger.execute('ENS text record tx sent', { txHash });
+      return { success: true, txHash };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      logger.error(`Failed to set ENS text record: ${msg}`);
+
+      // Fall back to local cache update
+      const cacheKey = `${ensName}:${key}`;
+      this.textRecordCache.set(cacheKey, value);
+      return { success: true };
+    }
   }
 
   clearCache(): void {

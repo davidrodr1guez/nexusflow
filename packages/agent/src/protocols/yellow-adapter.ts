@@ -223,7 +223,31 @@ export class YellowAdapter implements IProtocolAdapter {
       };
     }
 
+    if (!this.connected || !this.address) {
+      return {
+        success: false,
+        chainId: session.chainId,
+        error: 'Yellow adapter not connected',
+        timestamp: new Date(),
+      };
+    }
+
     logger.execute('Closing Yellow session', { sessionId });
+    session.status = 'closing';
+
+    const account = privateKeyToAccount(this.privateKey);
+    const closeData = {
+      type: 'close_session',
+      sessionId,
+      sender: this.address,
+      timestamp: Date.now(),
+    };
+
+    const signature = await account.signMessage({
+      message: JSON.stringify(closeData),
+    });
+
+    this.ws?.send(JSON.stringify({ ...closeData, signature }));
     session.status = 'closed';
 
     return {

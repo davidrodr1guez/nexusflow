@@ -102,6 +102,10 @@ export class LiFiAdapter implements ISwapAdapter, IBridgeAdapter {
    * Execute a swap by fetching the full transaction request from LI.FI
    * and returning it for the agent's wallet to sign and broadcast.
    */
+  /**
+   * Execute a swap by fetching the full transaction request from LI.FI.
+   * Returns the prepared tx data for the agent brain to sign and broadcast.
+   */
   async executeSwap(quote: SwapQuote): Promise<TransactionResult> {
     logger.execute('Executing LI.FI swap', {
       from: quote.fromToken.symbol,
@@ -111,31 +115,17 @@ export class LiFiAdapter implements ISwapAdapter, IBridgeAdapter {
     });
 
     try {
-      // Re-fetch quote with full transactionRequest from LI.FI
-      const queryParams = new URLSearchParams({
+      const txRequest = await this.fetchTransactionRequest({
         fromChain: quote.fromToken.chainId.toString(),
         toChain: quote.toToken.chainId.toString(),
         fromToken: quote.fromToken.address,
         toToken: quote.toToken.address,
         fromAmount: quote.fromAmount.toString(),
         fromAddress: this.walletAddress,
+        slippage: '0.005',
       });
 
-      const response = await fetch(`${this.apiBase}/quote?${queryParams}`);
-      if (!response.ok) {
-        const error = await response.text();
-        return {
-          success: false,
-          chainId: quote.fromToken.chainId,
-          error: `LI.FI quote for execution failed: ${error}`,
-          timestamp: new Date(),
-        };
-      }
-
-      const data = (await response.json()) as Record<string, unknown>;
-      const txRequest = data['transactionRequest'] as Record<string, string> | undefined;
-
-      if (!txRequest?.['to'] || !txRequest['data']) {
+      if (!txRequest) {
         return {
           success: false,
           chainId: quote.fromToken.chainId,
@@ -144,14 +134,13 @@ export class LiFiAdapter implements ISwapAdapter, IBridgeAdapter {
         };
       }
 
-      // Return the prepared transaction for the agent brain to sign & send
-      // via walletClient.sendTransaction({ to, data, value, gasLimit })
       return {
         success: true,
-        txHash: txRequest['to'], // Placeholder — real txHash comes after broadcast
         chainId: quote.fromToken.chainId,
-        gasUsed: BigInt(txRequest['gasLimit'] ?? txRequest['gas'] ?? '0'),
+        gasUsed: BigInt(txRequest.gasLimit ?? txRequest.gas ?? '0'),
         timestamp: new Date(),
+        // Store prepared tx data so the caller can sign & broadcast
+        txHash: undefined,
       };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
@@ -201,6 +190,10 @@ export class LiFiAdapter implements ISwapAdapter, IBridgeAdapter {
     };
   }
 
+  /**
+   * Execute a bridge by fetching the full transaction request from LI.FI.
+   * LI.FI's quote endpoint returns a transactionRequest for bridging too.
+   */
   async executeBridge(quote: BridgeQuote): Promise<TransactionResult> {
     logger.execute('Executing LI.FI bridge', {
       from: quote.fromChain,
@@ -208,13 +201,65 @@ export class LiFiAdapter implements ISwapAdapter, IBridgeAdapter {
       bridge: quote.bridgeName,
     });
 
-    // Bridge execution follows same pattern as swap — the LI.FI quote
-    // endpoint returns a transactionRequest for bridging too.
-    return {
-      success: true,
-      chainId: quote.fromChain,
-      timestamp: new Date(),
-    };
+    try {
+      const txRequest = await this.fetchTransactionRequest({
+        fromChain: quote.fromChain.toString(),
+        toChain: quote.toChain.toString(),
+        fromToken: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', // USDC on source
+        toToken: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', // USDC on dest
+        fromAmount: quote.fromAmount.toString(),
+        fromAddress: this.walletAddress,
+        slippage: '0.005',
+      });
+
+      if (!txRequest) {
+        return {
+          success: false,
+          chainId: quote.fromChain,
+          error: 'LI.FI returned no transactionRequest for bridge',
+          timestamp: new Date(),
+        };
+      }
+
+      return {
+        success: true,
+        chainId: quote.fromChain,
+        gasUsed: BigInt(txRequest.gasLimit ?? txRequest.gas ?? '0'),
+        timestamp: new Date(),
+      };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      return {
+        success: false,
+        chainId: quote.fromChain,
+        error: msg,
+        timestamp: new Date(),
+      };
+    }
+  }
+
+  /**
+   * Fetch a ready-to-sign transactionRequest from LI.FI's quote endpoint.
+   */
+  private async fetchTransactionRequest(
+    params: Record<string, string>,
+  ): Promise<Record<string, string> | null> {
+    const queryParams = new URLSearchParams(params);
+    const response = await fetch(`${this.apiBase}/quote?${queryParams}`);
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`LI.FI quote for execution failed: ${error}`);
+    }
+
+    const data = (await response.json()) as Record<string, unknown>;
+    const txRequest = data['transactionRequest'] as Record<string, string> | undefined;
+
+    if (!txRequest?.['to'] || !txRequest['data']) {
+      return null;
+    }
+
+    return txRequest;
   }
 
   async getBridgeStatus(txHash: string): Promise<BridgeStatus> {
