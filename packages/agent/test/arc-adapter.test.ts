@@ -1,87 +1,74 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ArcAdapter } from '../src/protocols/arc-adapter.js';
 
+// Mock viem/accounts
+vi.mock('viem/accounts', () => ({
+  privateKeyToAccount: vi.fn(() => ({
+    address: '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266' as const,
+  })),
+}));
+
+// Mock viem clients
+vi.mock('viem', async () => {
+  const actual = await vi.importActual('viem');
+  return {
+    ...actual,
+    createPublicClient: vi.fn(() => ({
+      readContract: vi.fn().mockResolvedValue(1000000000n), // 1000 USDC
+      waitForTransactionReceipt: vi.fn().mockResolvedValue({ status: 'success' }),
+    })),
+    createWalletClient: vi.fn(() => ({
+      sendTransaction: vi.fn().mockResolvedValue('0xmocktxhash'),
+    })),
+  };
+});
+
 describe('ArcAdapter', () => {
+  const TEST_PRIVATE_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
   let adapter: ArcAdapter;
   const originalFetch = globalThis.fetch;
 
-  beforeEach(() => {
-    adapter = new ArcAdapter('test-api-key');
+  beforeEach(async () => {
+    // Mock fetch for attestation API - return 404 for health check, which is expected
+    globalThis.fetch = vi.fn().mockResolvedValue({ 
+      status: 404, 
+      ok: false,
+      json: vi.fn().mockResolvedValue({ messages: [] }),
+    });
+    
+    adapter = new ArcAdapter(TEST_PRIVATE_KEY);
+    await adapter.initialize();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     globalThis.fetch = originalFetch;
+    await adapter.shutdown();
     vi.restoreAllMocks();
   });
 
-  it('should have correct name and chains', () => {
+  it('should have correct name and supported testnet chains', () => {
     expect(adapter.name).toBe('arc-circle');
-    expect(adapter.supportedChains).toContain(1);
-    expect(adapter.supportedChains).toContain(42161);
-    expect(adapter.supportedChains).toContain(10);
-    expect(adapter.supportedChains).toContain(8453);
+    // Now supports testnet chains
+    expect(adapter.supportedChains).toContain(11155111); // Sepolia
+    expect(adapter.supportedChains).toContain(421614);   // Arb Sepolia
+    expect(adapter.supportedChains).toContain(84532);    // Base Sepolia
+    expect(adapter.supportedChains).toContain(11155420); // OP Sepolia
   });
 
-  it('should create a wallet', async () => {
-    const wallet = await adapter.createWallet(1);
-    expect(wallet.walletId).toMatch(/^cw_/);
-    expect(wallet.address).toMatch(/^0x/);
-    expect(wallet.chainId).toBe(1);
-    expect(wallet.createdAt).toBeInstanceOf(Date);
+  it('should get USDC balance for a chain', async () => {
+    const balance = await adapter.getUsdcBalance(11155111);
+    expect(balance).toBe(1000000000n); // Mocked value
   });
 
-  it('should get USDC balance', async () => {
-    const wallet = await adapter.createWallet(42161);
-    const balance = await adapter.getUsdcBalance(wallet.walletId);
-    expect(balance.walletId).toBe(wallet.walletId);
-    expect(balance.chainId).toBe(42161);
-    expect(balance.balance).toBeGreaterThan(0n);
+  it('should return 0 balance for unsupported chain', async () => {
+    const balance = await adapter.getUsdcBalance(999);
+    expect(balance).toBe(0n);
   });
 
-  it('should throw on balance for non-existent wallet', async () => {
-    await expect(adapter.getUsdcBalance('cw_fake')).rejects.toThrow('not found');
-  });
-
-  it('should transfer USDC cross-chain', async () => {
-    const wallet = await adapter.createWallet(1);
-    const transfer = await adapter.transferCrossChain(wallet.walletId, 42161, 1000_000000n);
-    expect(transfer.transferId).toMatch(/^ct_/);
-    expect(transfer.fromChain).toBe(1);
-    expect(transfer.toChain).toBe(42161);
-    expect(transfer.amount).toBe(1000_000000n);
-    expect(transfer.status).toBe('completed');
-    expect(transfer.burnTxHash).toBeDefined();
-    expect(transfer.mintTxHash).toBeDefined();
-  });
-
-  it('should throw when transferring to same chain', async () => {
-    const wallet = await adapter.createWallet(1);
-    await expect(
-      adapter.transferCrossChain(wallet.walletId, 1, 100_000000n),
-    ).rejects.toThrow('different');
-  });
-
-  it('should throw on transfer from non-existent wallet', async () => {
-    await expect(
-      adapter.transferCrossChain('cw_fake', 42161, 100_000000n),
-    ).rejects.toThrow('not found');
-  });
-
-  it('should get transfer status', async () => {
-    const wallet = await adapter.createWallet(10);
-    const transfer = await adapter.transferCrossChain(wallet.walletId, 8453, 500_000000n);
-    const status = await adapter.getTransferStatus(transfer.transferId);
-    expect(status).toBe('completed');
-  });
-
-  it('should throw on status for non-existent transfer', async () => {
-    await expect(adapter.getTransferStatus('ct_fake')).rejects.toThrow('not found');
-  });
-
-  it('should handle healthCheck when API is up', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true });
+  it('should handle healthCheck when attestation API returns 404', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({ status: 404, ok: false });
     const result = await adapter.healthCheck();
-    expect(result).toBe(true);
+    expect(result).toBe(true); // 404 means API is reachable
   });
 
   it('should handle healthCheck when API is down', async () => {
@@ -90,9 +77,27 @@ describe('ArcAdapter', () => {
     expect(result).toBe(false);
   });
 
+  it('should throw on transfer for unsupported chain pair', async () => {
+    await expect(
+      adapter.transferCrossChain(999, 11155111, 100_000000n),
+    ).rejects.toThrow('not supported');
+  });
+
+  it('should get undefined for non-existent transfer', () => {
+    const transfer = adapter.getTransfer('nonexistent');
+    expect(transfer).toBeUndefined();
+  });
+
   it('should clean up on shutdown', async () => {
-    await adapter.createWallet(1);
     await adapter.shutdown();
-    expect(adapter.getWallet('any')).toBeUndefined();
+    expect(adapter.getTransfer('any')).toBeUndefined();
+  });
+
+  it('should not initialize without private key', async () => {
+    const noKeyAdapter = new ArcAdapter('');
+    await noKeyAdapter.initialize();
+    // Should still work but account will be null
+    const balance = await noKeyAdapter.getUsdcBalance(11155111);
+    expect(balance).toBe(0n);
   });
 });

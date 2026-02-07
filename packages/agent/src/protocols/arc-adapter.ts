@@ -1,228 +1,334 @@
 /**
- * Arc / Circle Protocol Adapter
+ * Arc / Circle CCTP Protocol Adapter
  *
- * Provides USDC cross-chain liquidity and settlement via Circle's CCTP
- * (Cross-Chain Transfer Protocol) and Arc infrastructure.
+ * Implements real cross-chain USDC transfers using Circle's CCTP
+ * (Cross-Chain Transfer Protocol). Burns USDC on source chain,
+ * retrieves attestation from Circle API, mints on destination chain.
  *
- * Key capabilities:
- *   - Create and manage USDC wallets across chains
- *   - Cross-chain USDC transfers with native burn/mint (no wrapping)
- *   - Transfer status tracking
- *
- * Product feedback (for Circle team):
- *   - The CCTP v2 attestation API latency is excellent (~15s for attestation)
- *   - Would benefit from a batch transfer endpoint for multi-chain rebalancing
- *   - SDK TypeScript types could be stricter — many `any` types in current SDK
- *   - WebSocket support for transfer status would eliminate polling
- *   - Consider adding a "quote" endpoint that estimates fees before execution
- *
- * Docs: https://developers.circle.com/
+ * Docs: https://developers.circle.com/cctp
  */
 
 import type { IProtocolAdapter, ChainId, TransactionResult } from '../types.js';
 import { createLogger } from '../utils/logger.js';
+import {
+  createPublicClient,
+  createWalletClient,
+  http,
+  encodeFunctionData,
+} from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
+import { sepolia, arbitrumSepolia, baseSepolia, optimismSepolia } from 'viem/chains';
 
 const logger = createLogger('arc-adapter');
 
-export interface CircleWallet {
-  walletId: string;
-  address: `0x${string}`;
-  chainId: ChainId;
-  createdAt: Date;
-}
+// CCTP Contract Addresses (Testnet)
+const CCTP_CONTRACTS: Record<number, {
+  usdc: `0x${string}`;
+  tokenMessenger: `0x${string}`;
+  messageTransmitter: `0x${string}`;
+  domain: number;
+}> = {
+  11155111: {
+    usdc: '0x1c7d4b196cb0c7b01d743fbc6116a902379c7238',
+    tokenMessenger: '0x8fe6b999dc680ccfdd5bf7eb0974218be2542daa',
+    messageTransmitter: '0xe737e5cebeeba77efe34d4aa090756590b1ce275',
+    domain: 0,
+  },
+  421614: {
+    usdc: '0x75faf114eafb1bdbe2f0316df893fd58ce46aa4d',
+    tokenMessenger: '0x8fe6b999dc680ccfdd5bf7eb0974218be2542daa',
+    messageTransmitter: '0xe737e5cebeeba77efe34d4aa090756590b1ce275',
+    domain: 3,
+  },
+  84532: {
+    usdc: '0x036cbd53842c5426634e7929541ec2318f3dcf7e',
+    tokenMessenger: '0x8fe6b999dc680ccfdd5bf7eb0974218be2542daa',
+    messageTransmitter: '0xe737e5cebeeba77efe34d4aa090756590b1ce275',
+    domain: 6,
+  },
+  11155420: {
+    usdc: '0x5fd84259d66cd46123540766be93dfe6d43130d7',
+    tokenMessenger: '0x8fe6b999dc680ccfdd5bf7eb0974218be2542daa',
+    messageTransmitter: '0xe737e5cebeeba77efe34d4aa090756590b1ce275',
+    domain: 2,
+  },
+};
 
-export interface UsdcBalance {
-  walletId: string;
-  chainId: ChainId;
-  balance: bigint; // 6 decimals
-  lastUpdated: Date;
-}
+const CHAINS = {
+  11155111: sepolia,
+  421614: arbitrumSepolia,
+  84532: baseSepolia,
+  11155420: optimismSepolia,
+} as const;
 
-export type CircleTransferStatus =
-  | 'pending'
-  | 'attesting'
-  | 'confirmed'
-  | 'completed'
-  | 'failed';
+const ATTESTATION_API = 'https://iris-api-sandbox.circle.com/v2/messages';
+
+interface AttestationMessage {
+  message: string;
+  attestation: string;
+  status: string;
+}
 
 export interface CrossChainTransfer {
   transferId: string;
   fromChain: ChainId;
   toChain: ChainId;
   amount: bigint;
-  status: CircleTransferStatus;
+  status: 'pending' | 'attesting' | 'ready' | 'completed' | 'failed';
   burnTxHash?: string;
   mintTxHash?: string;
   createdAt: Date;
 }
 
-// Circle CCTP domain mapping
-const CCTP_DOMAINS: Partial<Record<ChainId, number>> = {
-  1: 0,     // Ethereum
-  42161: 3, // Arbitrum
-  10: 2,    // Optimism
-  8453: 6,  // Base
-};
-
 export class ArcAdapter implements IProtocolAdapter {
   readonly name = 'arc-circle';
-  readonly supportedChains: readonly ChainId[] = [1, 42161, 10, 8453];
+  readonly supportedChains: readonly ChainId[] = [11155111, 421614, 84532, 11155420];
 
-  private apiBase: string;
-  private apiKey: string;
-  private wallets = new Map<string, CircleWallet>();
+  private privateKey: `0x${string}`;
+  private account: ReturnType<typeof privateKeyToAccount> | null = null;
   private transfers = new Map<string, CrossChainTransfer>();
 
-  constructor(apiKey?: string) {
-    this.apiKey = apiKey ?? process.env.CIRCLE_API_KEY ?? '';
-    this.apiBase = 'https://api.circle.com/v1';
+  constructor(privateKey?: string) {
+    this.privateKey = (privateKey ?? process.env.PRIVATE_KEY ?? '') as `0x${string}`;
   }
 
   async initialize(): Promise<void> {
-    logger.info('Initializing Arc/Circle adapter...');
+    logger.info('Initializing Arc/Circle CCTP adapter...');
+
+    if (!this.privateKey) {
+      logger.decide('No PRIVATE_KEY set — Arc adapter disabled');
+      return;
+    }
+
+    this.account = privateKeyToAccount(this.privateKey);
+
     const healthy = await this.healthCheck();
     if (!healthy) {
-      logger.decide('Circle API unreachable — running in simulation mode');
+      logger.decide('Circle Attestation API unreachable — CCTP transfers may fail');
     }
-    logger.execute('Arc/Circle adapter initialized', {
+
+    logger.execute('Arc/Circle CCTP adapter initialized', {
+      address: this.account.address,
       chains: this.supportedChains,
-      cctpDomains: CCTP_DOMAINS,
+      cctpDomains: Object.fromEntries(
+        Object.entries(CCTP_CONTRACTS).map(([k, v]) => [k, v.domain]),
+      ),
     });
   }
 
   async healthCheck(): Promise<boolean> {
     try {
-      const response = await fetch(`${this.apiBase}/ping`, {
-        headers: { Authorization: `Bearer ${this.apiKey}` },
-      });
-      return response.ok;
+      const response = await fetch(`${ATTESTATION_API}/0?transactionHash=0x0`);
+      return response.status === 404 || response.ok;
     } catch {
       return false;
     }
   }
 
   async shutdown(): Promise<void> {
-    this.wallets.clear();
     this.transfers.clear();
-    logger.info('Arc/Circle adapter shut down');
+    logger.info('Arc/Circle CCTP adapter shut down');
   }
 
   /**
-   * Create a new USDC wallet on a specific chain.
-   * In production: calls Circle's Programmable Wallets API.
+   * Get USDC balance on a specific chain.
    */
-  async createWallet(chainId: ChainId): Promise<CircleWallet> {
-    logger.execute('Creating Circle wallet', { chainId });
+  async getUsdcBalance(chainId: number): Promise<bigint> {
+    const contracts = CCTP_CONTRACTS[chainId];
+    const chain = CHAINS[chainId as keyof typeof CHAINS];
 
-    // Product feedback: Circle's wallet creation API is fast but requires
-    // entity verification. Would be nice to have a "dev mode" that skips this.
-    const wallet: CircleWallet = {
-      walletId: `cw_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      address: `0x${Array.from({ length: 40 }, () => Math.floor(Math.random() * 16).toString(16)).join('')}` as `0x${string}`,
-      chainId,
-      createdAt: new Date(),
-    };
-
-    this.wallets.set(wallet.walletId, wallet);
-    logger.execute('Circle wallet created', { walletId: wallet.walletId, chainId });
-    return wallet;
-  }
-
-  /**
-   * Get USDC balance for a wallet.
-   * Product feedback: Balance API returns string amounts — BigInt conversion
-   * should be handled by the SDK, not the consumer.
-   */
-  async getUsdcBalance(walletId: string): Promise<UsdcBalance> {
-    const wallet = this.wallets.get(walletId);
-    if (!wallet) {
-      throw new Error(`Wallet ${walletId} not found`);
+    if (!contracts || !chain || !this.account) {
+      return 0n;
     }
 
-    logger.monitor('Fetching USDC balance', { walletId, chainId: wallet.chainId });
+    try {
+      const client = createPublicClient({ chain, transport: http() });
+      const balance = await client.readContract({
+        address: contracts.usdc,
+        abi: [{
+          type: 'function',
+          name: 'balanceOf',
+          stateMutability: 'view',
+          inputs: [{ name: 'account', type: 'address' }],
+          outputs: [{ name: '', type: 'uint256' }],
+        }],
+        functionName: 'balanceOf',
+        args: [this.account.address],
+      });
 
-    // Simulated balance for hackathon demo
-    return {
-      walletId,
-      chainId: wallet.chainId,
-      balance: 5000_000000n, // 5000 USDC (6 decimals)
-      lastUpdated: new Date(),
-    };
+      return balance as bigint;
+    } catch (error) {
+      logger.error('Failed to get USDC balance', { chainId, error });
+      return 0n;
+    }
   }
 
   /**
-   * Transfer USDC cross-chain using Circle's CCTP (burn on source, mint on destination).
-   * This is native USDC — no wrapping, no bridging risk.
-   *
-   * Product feedback: The burn→attest→mint flow is elegant but the attestation
-   * polling could be replaced with webhooks for better DX.
+   * Transfer USDC cross-chain using Circle CCTP.
    */
   async transferCrossChain(
-    fromWalletId: string,
-    toChain: ChainId,
+    fromChain: number,
+    toChain: number,
     amount: bigint,
+    recipient?: `0x${string}`,
   ): Promise<CrossChainTransfer> {
-    const fromWallet = this.wallets.get(fromWalletId);
-    if (!fromWallet) {
-      throw new Error(`Source wallet ${fromWalletId} not found`);
+    const sourceContracts = CCTP_CONTRACTS[fromChain];
+    const destContracts = CCTP_CONTRACTS[toChain];
+    const sourceChain = CHAINS[fromChain as keyof typeof CHAINS];
+    const destChain = CHAINS[toChain as keyof typeof CHAINS];
+
+    if (!sourceContracts || !destContracts || !sourceChain || !destChain) {
+      throw new Error(`CCTP not supported for chain pair ${fromChain} -> ${toChain}`);
     }
 
-    if (fromWallet.chainId === toChain) {
-      throw new Error('Source and destination chains must be different');
+    if (!this.account) {
+      throw new Error('Account not initialized');
     }
 
-    const sourceDomain = CCTP_DOMAINS[fromWallet.chainId];
-    const destDomain = CCTP_DOMAINS[toChain];
-
-    if (sourceDomain === undefined || destDomain === undefined) {
-      throw new Error(`CCTP not supported for this chain pair`);
-    }
-
-    logger.execute('Initiating CCTP cross-chain transfer', {
-      from: fromWallet.chainId,
-      to: toChain,
-      amount: amount.toString(),
-      sourceDomain,
-      destDomain,
-    });
+    const destinationAddress = recipient ?? this.account.address;
+    const transferId = `cctp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
     const transfer: CrossChainTransfer = {
-      transferId: `ct_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      fromChain: fromWallet.chainId,
-      toChain,
+      transferId,
+      fromChain: fromChain as ChainId,
+      toChain: toChain as ChainId,
       amount,
-      status: 'completed', // Simulated instant completion for demo
-      burnTxHash: `0x${Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join('')}`,
-      mintTxHash: `0x${Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join('')}`,
+      status: 'pending',
       createdAt: new Date(),
     };
+    this.transfers.set(transferId, transfer);
 
-    this.transfers.set(transfer.transferId, transfer);
-    logger.execute('CCTP transfer completed', {
-      transferId: transfer.transferId,
-      status: transfer.status,
+    logger.execute('Initiating CCTP cross-chain transfer', {
+      transferId,
+      from: fromChain,
+      to: toChain,
+      amount: amount.toString(),
     });
 
-    return transfer;
-  }
+    try {
+      const sourceWallet = createWalletClient({
+        chain: sourceChain,
+        transport: http(),
+        account: this.account,
+      });
 
-  /**
-   * Get the status of a cross-chain transfer.
-   * Product feedback: Status endpoint could include estimated time remaining.
-   */
-  async getTransferStatus(transferId: string): Promise<CircleTransferStatus> {
-    const transfer = this.transfers.get(transferId);
-    if (!transfer) {
-      throw new Error(`Transfer ${transferId} not found`);
+      const destWallet = createWalletClient({
+        chain: destChain,
+        transport: http(),
+        account: this.account,
+      });
+
+      const sourcePublic = createPublicClient({ chain: sourceChain, transport: http() });
+
+      // Step 1: Approve USDC
+      logger.monitor('Approving USDC...');
+      const approveTx = await sourceWallet.sendTransaction({
+        to: sourceContracts.usdc,
+        data: encodeFunctionData({
+          abi: [{
+            type: 'function',
+            name: 'approve',
+            stateMutability: 'nonpayable',
+            inputs: [
+              { name: 'spender', type: 'address' },
+              { name: 'amount', type: 'uint256' },
+            ],
+            outputs: [{ name: '', type: 'bool' }],
+          }],
+          functionName: 'approve',
+          args: [sourceContracts.tokenMessenger, amount],
+        }),
+      });
+      await sourcePublic.waitForTransactionReceipt({ hash: approveTx });
+
+      // Step 2: Burn USDC
+      logger.monitor('Burning USDC...');
+      const destAddressBytes32 = `0x000000000000000000000000${destinationAddress.slice(2)}` as `0x${string}`;
+      const zeroBytes32 = '0x0000000000000000000000000000000000000000000000000000000000000000' as `0x${string}`;
+
+      const burnTx = await sourceWallet.sendTransaction({
+        to: sourceContracts.tokenMessenger,
+        data: encodeFunctionData({
+          abi: [{
+            type: 'function',
+            name: 'depositForBurn',
+            stateMutability: 'nonpayable',
+            inputs: [
+              { name: 'amount', type: 'uint256' },
+              { name: 'destinationDomain', type: 'uint32' },
+              { name: 'mintRecipient', type: 'bytes32' },
+              { name: 'burnToken', type: 'address' },
+              { name: 'destinationCaller', type: 'bytes32' },
+              { name: 'maxFee', type: 'uint256' },
+              { name: 'minFinalityThreshold', type: 'uint32' },
+            ],
+            outputs: [],
+          }],
+          functionName: 'depositForBurn',
+          args: [amount, destContracts.domain, destAddressBytes32, sourceContracts.usdc, zeroBytes32, 500n, 1000],
+        }),
+      });
+
+      transfer.burnTxHash = burnTx;
+      transfer.status = 'attesting';
+      await sourcePublic.waitForTransactionReceipt({ hash: burnTx });
+      logger.execute('USDC burned', { txHash: burnTx });
+
+      // Step 3: Get attestation
+      logger.monitor('Waiting for attestation...');
+      const attestation = await this.waitForAttestation(sourceContracts.domain, burnTx);
+      transfer.status = 'ready';
+
+      // Step 4: Mint on destination
+      logger.monitor('Minting on destination...');
+      const mintTx = await destWallet.sendTransaction({
+        to: destContracts.messageTransmitter,
+        data: encodeFunctionData({
+          abi: [{
+            type: 'function',
+            name: 'receiveMessage',
+            stateMutability: 'nonpayable',
+            inputs: [
+              { name: 'message', type: 'bytes' },
+              { name: 'attestation', type: 'bytes' },
+            ],
+            outputs: [],
+          }],
+          functionName: 'receiveMessage',
+          args: [attestation.message as `0x${string}`, attestation.attestation as `0x${string}`],
+        }),
+      });
+
+      transfer.mintTxHash = mintTx;
+      transfer.status = 'completed';
+      logger.execute('CCTP transfer completed', { transferId, burnTx, mintTx });
+
+      return transfer;
+    } catch (error) {
+      transfer.status = 'failed';
+      throw error;
     }
-    return transfer.status;
   }
 
-  getWallet(walletId: string): CircleWallet | undefined {
-    return this.wallets.get(walletId);
+  private async waitForAttestation(sourceDomain: number, txHash: string, maxAttempts = 60): Promise<AttestationMessage> {
+    const url = `${ATTESTATION_API}/${sourceDomain}?transactionHash=${txHash}`;
+
+    for (let i = 0; i < maxAttempts; i++) {
+      try {
+        const res = await fetch(url);
+        if (res.ok) {
+          const data = await res.json() as { messages: AttestationMessage[] };
+          if (data.messages?.[0]?.status === 'complete') {
+            return data.messages[0];
+          }
+        }
+      } catch { /* retry */ }
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+    throw new Error('Attestation timeout');
   }
 
-  getTransfer(transferId: string): CrossChainTransfer | undefined {
-    return this.transfers.get(transferId);
+  getTransfer(id: string): CrossChainTransfer | undefined {
+    return this.transfers.get(id);
   }
 }

@@ -16,7 +16,7 @@ import { parseEther } from 'viem';
 const logger = createLogger('server');
 
 const PORT = parseInt(process.env.AGENT_PORT ?? '3001', 10);
-const ALLOWED_ORIGINS = ['http://localhost:5173', 'http://localhost:4173', 'http://127.0.0.1:5173'];
+const ALLOWED_ORIGINS = ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:5175', 'http://localhost:5176', 'http://localhost:4173', 'http://127.0.0.1:5173'];
 
 interface TransactionRecord {
   txHash: string;

@@ -7,7 +7,9 @@
 // Chain & Token Types
 // ============================================================
 
-export type ChainId = 1 | 42161 | 10 | 8453 | 11155111; // ETH, ARB, OP, BASE, Sepolia
+// Mainnet + Testnet chain IDs
+export type ChainId = 1 | 42161 | 10 | 8453 | 11155111 | 421614 | 84532 | 11155420;
+// ETH, ARB, OP, BASE, Sepolia, Arb-Sepolia, Base-Sepolia, OP-Sepolia
 
 export interface TokenInfo {
   address: `0x${string}`;
