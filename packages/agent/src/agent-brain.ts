@@ -18,7 +18,7 @@ import type {
 import { protocolRegistry } from './protocols/index.js';
 import { strategyRegistry } from './strategies/index.js';
 import { getAgentBalances, balanceToChainBalance } from './blockchain/balances.js';
-import { addTransaction } from './server.js';
+import { addTransaction } from './transaction-store.js';
 import { createLogger } from './utils/logger.js';
 
 const logger = createLogger('agent-brain');

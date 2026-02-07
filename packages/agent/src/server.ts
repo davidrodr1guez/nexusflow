@@ -12,37 +12,16 @@ import { getAgentBalances, getAddressBalance } from './blockchain/balances.js';
 import { createLogger } from './utils/logger.js';
 import type { AgentBrain } from './agent-brain.js';
 import { parseEther } from 'viem';
+import { sepolia } from 'viem/chains';
 
 const logger = createLogger('server');
 
 const PORT = parseInt(process.env.AGENT_PORT ?? '3001', 10);
 const ALLOWED_ORIGINS = ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:5175', 'http://localhost:5176', 'http://localhost:4173', 'http://127.0.0.1:5173'];
 
-interface TransactionRecord {
-  txHash: string;
-  type: 'deposit' | 'withdraw' | 'swap' | 'bridge' | 'hook';
-  description: string;
-  amount?: string;
-  from?: string;
-  to?: string;
-  chainId: number;
-  timestamp: string;
-  status: 'pending' | 'confirmed' | 'failed';
-  etherscanUrl: string;
-}
+import { addTransaction, getTransactions, findTransaction } from './transaction-store.js';
 
-// In-memory transaction store
-const transactions: TransactionRecord[] = [];
-
-export function addTransaction(tx: Omit<TransactionRecord, 'etherscanUrl'>): void {
-  transactions.unshift({
-    ...tx,
-    etherscanUrl: `https://sepolia.etherscan.io/tx/${tx.txHash}`,
-  });
-  if (transactions.length > 200) {
-    transactions.length = 200;
-  }
-}
+export { addTransaction };
 
 function corsHeaders(origin: string | undefined): Record<string, string> {
   const allowedOrigin = origin && ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0]!;
@@ -65,10 +44,19 @@ function json(res: ServerResponse, data: unknown, status = 200, origin?: string)
   res.end(JSON.stringify(data, bigintReplacer));
 }
 
+const MAX_BODY_SIZE = 1024 * 64; // 64 KB
+
 function parseBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     let body = '';
+    let size = 0;
     req.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > MAX_BODY_SIZE) {
+        req.destroy();
+        reject(new Error('Request body too large'));
+        return;
+      }
       body += chunk.toString();
     });
     req.on('end', () => {
@@ -173,7 +161,7 @@ export function startServer(agent: AgentBrain): void {
 
       // GET /api/transactions
       if (path === '/api/transactions' && method === 'GET') {
-        json(res, transactions, 200, origin);
+        json(res, getTransactions(), 200, origin);
         return;
       }
 
@@ -195,7 +183,7 @@ export function startServer(agent: AgentBrain): void {
 
         const txHash = await walletClient.sendTransaction({
           account: getAccount(),
-          chain: (await import('viem/chains')).sepolia,
+          chain: sepolia,
           to: toAddress,
           value,
         });
@@ -217,11 +205,11 @@ export function startServer(agent: AgentBrain): void {
         // Wait for confirmation
         const publicClient = getPublicClient();
         publicClient.waitForTransactionReceipt({ hash: txHash as `0x${string}` }).then(() => {
-          const tx = transactions.find((t) => t.txHash === txHash);
+          const tx = findTransaction(txHash);
           if (tx) tx.status = 'confirmed';
           logger.execute(`Withdraw confirmed: ${txHash}`);
         }).catch(() => {
-          const tx = transactions.find((t) => t.txHash === txHash);
+          const tx = findTransaction(txHash);
           if (tx) tx.status = 'failed';
         });
 

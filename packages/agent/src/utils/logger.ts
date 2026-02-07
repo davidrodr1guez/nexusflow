@@ -43,7 +43,7 @@ export function createLogger(module: string) {
 
   return {
     info: (message: string, meta?: Record<string, unknown>) => log('monitor', message, meta),
-    warn: (message: string, meta?: Record<string, unknown>) => log('decide', message, meta),
+    warn: (message: string, meta?: Record<string, unknown>) => log('monitor', message, meta),
     error: (message: string, meta?: Record<string, unknown>) => log('error', message, meta),
     monitor: (message: string, meta?: Record<string, unknown>) => log('monitor', message, meta),
     decide: (message: string, meta?: Record<string, unknown>) => log('decide', message, meta),
