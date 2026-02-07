@@ -96,6 +96,12 @@ export interface IStrategy {
 
   /** Get current performance metrics */
   getMetrics(): StrategyMetrics;
+
+  /** Pause strategy execution */
+  pause(): void;
+
+  /** Resume strategy execution */
+  resume(): void;
 }
 
 export interface StrategyAction {

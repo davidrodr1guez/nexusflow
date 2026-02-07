@@ -267,4 +267,62 @@ export class AgentBrain {
   getTickCount(): number {
     return this.tickCount;
   }
+
+  /**
+   * Execute a strategy on-demand (called from API).
+   * Evaluates the strategy to produce an action, then executes it.
+   * If the strategy finds no action, returns an error result.
+   */
+  async executeStrategy(strategyId: string): Promise<TransactionResult> {
+    const strategy = strategyRegistry.get(strategyId);
+
+    this.addLog('execute', `Manual execution requested for "${strategy.name}"`);
+
+    // Refresh state before evaluating
+    await this.monitor();
+
+    const action = await strategy.evaluate(this.state);
+    if (!action) {
+      this.addLog('decide', `Strategy "${strategy.name}" found no actionable opportunity right now`);
+      return {
+        success: false,
+        chainId: 11155111 as ChainId,
+        error: 'No actionable opportunity found. Conditions not met for execution.',
+        timestamp: new Date(),
+      };
+    }
+
+    this.addLog('decide', `Strategy "${strategy.name}" suggests: ${action.description}`);
+    return this.execute(action);
+  }
+
+  /**
+   * Get strategy status and metrics for all registered strategies.
+   */
+  getStrategies(): Array<{ id: string; name: string; status: string; metrics: Record<string, unknown> }> {
+    return strategyRegistry.getAll().map((s) => ({
+      id: s.id,
+      name: s.name,
+      status: s.getStatus(),
+      metrics: {
+        ...s.getMetrics(),
+        totalPnl: s.getMetrics().totalPnl.toString(),
+        allocatedCapital: s.getMetrics().allocatedCapital.toString(),
+      },
+    }));
+  }
+
+  /**
+   * Pause or resume a strategy.
+   */
+  setStrategyStatus(strategyId: string, active: boolean): void {
+    const strategy = strategyRegistry.get(strategyId);
+    if (active) {
+      strategy.resume();
+      this.addLog('execute', `Strategy "${strategy.name}" resumed`);
+    } else {
+      strategy.pause();
+      this.addLog('execute', `Strategy "${strategy.name}" paused`);
+    }
+  }
 }

@@ -239,6 +239,65 @@ export function startServer(agent: AgentBrain): void {
         return;
       }
 
+      // GET /api/strategies
+      if (path === '/api/strategies' && method === 'GET') {
+        const strategies = agent.getStrategies();
+        json(res, strategies, 200, origin);
+        return;
+      }
+
+      // POST /api/strategy/execute
+      if (path === '/api/strategy/execute' && method === 'POST') {
+        const body = await parseBody(req);
+        const strategyId = body['strategyId'] as string | undefined;
+
+        if (!strategyId) {
+          json(res, { error: 'Missing "strategyId"' }, 400, origin);
+          return;
+        }
+
+        logger.execute(`Strategy execution requested: ${strategyId}`);
+
+        const result = await agent.executeStrategy(strategyId);
+
+        if (result.txHash) {
+          addTransaction({
+            txHash: result.txHash,
+            type: 'swap',
+            description: `Manual strategy execution: ${strategyId}`,
+            chainId: result.chainId,
+            timestamp: new Date().toISOString(),
+            status: result.success ? 'confirmed' : 'failed',
+          });
+        }
+
+        json(res, {
+          success: result.success,
+          txHash: result.txHash,
+          chainId: result.chainId,
+          gasUsed: result.gasUsed?.toString(),
+          error: result.error,
+          etherscanUrl: result.txHash ? `https://sepolia.etherscan.io/tx/${result.txHash}` : undefined,
+        }, result.success ? 200 : 422, origin);
+        return;
+      }
+
+      // POST /api/strategy/toggle
+      if (path === '/api/strategy/toggle' && method === 'POST') {
+        const body = await parseBody(req);
+        const strategyId = body['strategyId'] as string | undefined;
+        const active = body['active'] as boolean | undefined;
+
+        if (!strategyId || active === undefined) {
+          json(res, { error: 'Missing "strategyId" or "active"' }, 400, origin);
+          return;
+        }
+
+        agent.setStrategyStatus(strategyId, active);
+        json(res, { strategyId, active }, 200, origin);
+        return;
+      }
+
       // GET /api/hook
       if (path === '/api/hook' && method === 'GET') {
         json(res, {
@@ -270,6 +329,9 @@ export function startServer(agent: AgentBrain): void {
     logger.info('  POST /api/withdraw');
     logger.info('  POST /api/agent/start');
     logger.info('  POST /api/agent/stop');
+    logger.info('  GET  /api/strategies');
+    logger.info('  POST /api/strategy/execute');
+    logger.info('  POST /api/strategy/toggle');
     logger.info('  GET  /api/hook');
   });
 }

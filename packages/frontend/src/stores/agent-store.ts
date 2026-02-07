@@ -63,6 +63,26 @@ interface AgentState {
   lastUpdated: string;
 }
 
+interface StrategyInfo {
+  id: string;
+  name: string;
+  status: 'active' | 'paused' | 'stopped' | 'error';
+  metrics: {
+    totalPnl: string;
+    apy: number;
+    executedTrades: number;
+    successRate: number;
+    allocatedCapital: string;
+  };
+}
+
+interface StrategyExecutionResult {
+  success: boolean;
+  txHash?: string;
+  error?: string;
+  etherscanUrl?: string;
+}
+
 // ============================================================
 // Store
 // ============================================================
@@ -78,6 +98,7 @@ interface AgentStore {
   logs: AgentLog[];
   transactions: TransactionRecord[];
   agentState: AgentState | null;
+  strategies: StrategyInfo[];
 
   // Polling
   pollInterval: ReturnType<typeof setInterval> | null;
@@ -88,10 +109,13 @@ interface AgentStore {
   fetchLogs: () => Promise<void>;
   fetchTransactions: () => Promise<void>;
   fetchState: () => Promise<void>;
+  fetchStrategies: () => Promise<void>;
   fetchAll: () => Promise<void>;
   startPolling: (intervalMs?: number) => void;
   stopPolling: () => void;
   withdraw: (to: string, amount: string) => Promise<{ success: boolean; txHash?: string; error?: string }>;
+  executeStrategy: (strategyId: string) => Promise<StrategyExecutionResult>;
+  toggleStrategy: (strategyId: string, active: boolean) => Promise<void>;
 }
 
 async function safeFetch<T>(url: string): Promise<T | null> {
@@ -112,6 +136,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   logs: [],
   transactions: [],
   agentState: null,
+  strategies: [],
   pollInterval: null,
 
   fetchHealth: async () => {
@@ -143,6 +168,11 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     if (data) set({ agentState: data });
   },
 
+  fetchStrategies: async () => {
+    const data = await safeFetch<StrategyInfo[]>(`${AGENT_API_URL}/api/strategies`);
+    if (data) set({ strategies: data });
+  },
+
   fetchAll: async () => {
     const store = get();
     await Promise.all([
@@ -151,6 +181,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       store.fetchLogs(),
       store.fetchTransactions(),
       store.fetchState(),
+      store.fetchStrategies(),
     ]);
   },
 
@@ -185,13 +216,40 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       });
       const data = (await res.json()) as { success?: boolean; txHash?: string; error?: string };
       if (data.success) {
-        // Refresh data after withdrawal
         setTimeout(() => get().fetchAll(), 2000);
         return { success: true, txHash: data.txHash };
       }
       return { success: false, error: data.error ?? 'Withdrawal failed' };
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : 'Network error' };
+    }
+  },
+
+  executeStrategy: async (strategyId: string) => {
+    try {
+      const res = await fetch(`${AGENT_API_URL}/api/strategy/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ strategyId }),
+      });
+      const data = (await res.json()) as StrategyExecutionResult;
+      setTimeout(() => get().fetchAll(), 2000);
+      return data;
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Network error' };
+    }
+  },
+
+  toggleStrategy: async (strategyId: string, active: boolean) => {
+    try {
+      await fetch(`${AGENT_API_URL}/api/strategy/toggle`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ strategyId, active }),
+      });
+      setTimeout(() => get().fetchAll(), 1000);
+    } catch {
+      // silent fail — next poll will reflect state
     }
   },
 }));
