@@ -13,6 +13,8 @@ import { createLogger } from './utils/logger.js';
 import type { AgentBrain } from './agent-brain.js';
 import { parseEther } from 'viem';
 import { sepolia } from 'viem/chains';
+import { protocolRegistry } from './protocols/index.js';
+import type { YellowAdapter } from './protocols/yellow-adapter.js';
 
 const logger = createLogger('server');
 
@@ -309,6 +311,102 @@ export function startServer(agent: AgentBrain): void {
         return;
       }
 
+      // =====================
+      // YELLOW SDK ENDPOINTS
+      // =====================
+
+      // GET /api/yellow/status - Get Yellow connection status
+      if (path === '/api/yellow/status' && method === 'GET') {
+        const yellowAdapter = protocolRegistry.get('yellow') as YellowAdapter;
+        json(res, {
+          connected: yellowAdapter?.isConnected() ?? false,
+          sessions: yellowAdapter?.getOpenSessions() ?? [],
+        }, 200, origin);
+        return;
+      }
+
+      // POST /api/yellow/session - Create a payment session
+      if (path === '/api/yellow/session' && method === 'POST') {
+        const body = await parseBody(req);
+        const partner = body['partner'] as `0x${string}` | undefined;
+        const amount = body['amount'] as string | undefined;
+
+        if (!partner) {
+          json(res, { error: 'Missing "partner" address' }, 400, origin);
+          return;
+        }
+
+        const yellowAdapter = protocolRegistry.get('yellow') as YellowAdapter;
+        if (!yellowAdapter?.isConnected()) {
+          json(res, { error: 'Yellow Network not connected' }, 503, origin);
+          return;
+        }
+
+        const session = await yellowAdapter.createSession(
+          partner,
+          1, // mainnet chainId
+          BigInt(amount ?? '1000000') // default 1 USDC (6 decimals)
+        );
+
+        logger.execute(`Yellow session created: ${session.sessionId}`);
+        json(res, session, 200, origin);
+        return;
+      }
+
+      // POST /api/yellow/payment - Send instant off-chain payment
+      if (path === '/api/yellow/payment' && method === 'POST') {
+        const body = await parseBody(req);
+        const sessionId = body['sessionId'] as string | undefined;
+        const amount = body['amount'] as string | undefined;
+        const recipient = body['recipient'] as `0x${string}` | undefined;
+
+        if (!sessionId || !amount || !recipient) {
+          json(res, { error: 'Missing "sessionId", "amount", or "recipient"' }, 400, origin);
+          return;
+        }
+
+        const yellowAdapter = protocolRegistry.get('yellow') as YellowAdapter;
+        const result = await yellowAdapter.sendPayment(sessionId, BigInt(amount), recipient);
+
+        addTransaction({
+          txHash: result.txHash ?? `yellow_${sessionId}_${Date.now()}`,
+          type: 'swap',
+          description: `Yellow instant payment: ${amount} to ${recipient.slice(0, 8)}...`,
+          chainId: result.chainId,
+          timestamp: new Date().toISOString(),
+          status: result.success ? 'confirmed' : 'failed',
+        });
+
+        json(res, result, result.success ? 200 : 422, origin);
+        return;
+      }
+
+      // POST /api/yellow/close - Close session and settle on-chain
+      if (path === '/api/yellow/close' && method === 'POST') {
+        const body = await parseBody(req);
+        const sessionId = body['sessionId'] as string | undefined;
+
+        if (!sessionId) {
+          json(res, { error: 'Missing "sessionId"' }, 400, origin);
+          return;
+        }
+
+        const yellowAdapter = protocolRegistry.get('yellow') as YellowAdapter;
+        const result = await yellowAdapter.closeSession(sessionId);
+
+        addTransaction({
+          txHash: result.txHash ?? `yellow_close_${sessionId}`,
+          type: 'swap',
+          description: `Yellow session closed: ${sessionId}`,
+          chainId: result.chainId,
+          timestamp: new Date().toISOString(),
+          status: result.success ? 'confirmed' : 'failed',
+        });
+
+        json(res, result, result.success ? 200 : 422, origin);
+        return;
+      }
+
       // 404
       json(res, { error: 'Not found' }, 404, origin);
     } catch (err) {
@@ -333,5 +431,9 @@ export function startServer(agent: AgentBrain): void {
     logger.info('  POST /api/strategy/execute');
     logger.info('  POST /api/strategy/toggle');
     logger.info('  GET  /api/hook');
+    logger.info('  GET  /api/yellow/status');
+    logger.info('  POST /api/yellow/session');
+    logger.info('  POST /api/yellow/payment');
+    logger.info('  POST /api/yellow/close');
   });
 }

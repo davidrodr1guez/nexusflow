@@ -15,7 +15,7 @@ import { privateKeyToAccount } from 'viem/accounts';
 
 const logger = createLogger('yellow-adapter');
 
-const CLEARNET_SANDBOX_URL = 'wss://clearnet-sandbox.yellow.com/ws';
+const CLEARNET_SANDBOX_URL = 'wss://clearnet.yellow.com/ws';  // sandbox URL deprecated, using production
 const CLEARNET_PRODUCTION_URL = 'wss://clearnet.yellow.com/ws';
 
 export interface YellowSession {
@@ -305,6 +305,15 @@ export class YellowAdapter implements IProtocolAdapter {
           this.connected = false;
           this.ws = null;
           logger.info('WebSocket disconnected from ClearNet');
+          // Auto-reconnect after 5 seconds
+          setTimeout(() => {
+            if (!this.connected) {
+              logger.info('Attempting to reconnect to ClearNet...');
+              this.connectWebSocket().catch(() => {
+                logger.decide('ClearNet reconnect failed — will retry on next health check');
+              });
+            }
+          }, 5000);
         });
       } catch (error) {
         reject(error);
